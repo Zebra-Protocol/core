@@ -1,0 +1,11 @@
+test/
+scripts/
+build/
+node_modules/
+package-lock.json
+*.iml
+.idea
+.DS_Store
+yarn-error.log
+waffle.json
+assets
