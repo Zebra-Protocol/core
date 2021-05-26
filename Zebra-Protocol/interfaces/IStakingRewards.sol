@@ -22,7 +22,5 @@ interface IStakingRewards {
 
     function withdraw(uint256 amount, address user) external;
 
-    function getReward(address user) external;
-
-    function exit(address user) external;
+    function getReward() external;
 }

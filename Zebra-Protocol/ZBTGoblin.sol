@@ -97,6 +97,7 @@ contract ZBTGoblin is Ownable, ReentrancyGuard, Goblin {
         payable
         onlyOperator
         nonReentrant
+        returns(uint256)
     {
         require(borrowToken == token0 || borrowToken == token1 || borrowToken == address(0), "borrowToken not token0 and token1");
 
@@ -119,19 +120,20 @@ contract ZBTGoblin is Ownable, ReentrancyGuard, Goblin {
         Strategy(strategy).execute{value:msg.value}(user, borrowToken, borrow, debt, ext);
         
         // 3. Add LP tokens back to the farming pool.
-        _addPosition(id, user);
+        uint256 lptBalance = _addPosition(id, user);
 
         if (borrowToken == address(0)) {
             safeTransferETH(msg.sender, address(this).balance);
         } else {
-            uint256 borrowTokenAmount = myBalance(borrowToken);
-            if(borrowTokenAmount > 0){
-                IERC20(borrowToken).safeTransfer(msg.sender, borrowTokenAmount);
+            uint256 lastAmount = myBalance(borrowToken);
+            if(lastAmount > 0){
+                IERC20(borrowToken).safeTransfer(msg.sender, lastAmount);
             }
         }
+        return lptBalance;
     }
 
-    /// @dev Return maximum output given the input amount and the status of Uniswap reserves.
+    /// @dev Return maximum output given the input amount and the status of Mdex reserves.
     /// @param aIn The amount of asset to market sell.
     /// @param rIn the amount of asset in reserve for input.
     /// @param rOut The amount of asset in reserve for output.
@@ -210,7 +212,7 @@ contract ZBTGoblin is Ownable, ReentrancyGuard, Goblin {
     }
 
     /// @dev Internal function to stake all outstanding LP tokens to the given position ID.
-    function _addPosition(uint256 id, address user) internal {
+    function _addPosition(uint256 id, address user) internal returns(uint256) {
         uint256 lpBalance = lpToken.balanceOf(address(this));
         if (lpBalance > 0) {
             // take lpToken to the pool2.
@@ -219,6 +221,8 @@ contract ZBTGoblin is Ownable, ReentrancyGuard, Goblin {
             totalLPAmount = totalLPAmount.add(lpBalance);
             emit AddPosition(id, lpBalance);
         }
+
+        return lpBalance;
     }
 
     /// @dev Internal function to remove shares of the ID and convert to outstanding LP tokens.

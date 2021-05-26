@@ -7,9 +7,7 @@ import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import '@openzeppelin/contracts/utils/Address.sol';
 import '@openzeppelin/contracts/token/ERC20/SafeERC20.sol';
 
-import '../access/Operator.sol';
-
-contract zTokenPool is Operator {
+contract zTokenPool {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -18,6 +16,7 @@ contract zTokenPool is Operator {
 
     uint256 public duration; //周期
     uint256 public duration1 = 7 days; //第1阶段周期（1周）持续6周
+    //uint256 public duration1 = 15 minutes; //第1阶段周期（1周）持续6周
     uint256 public period; //周期
 
     uint256 public rewardBase;
@@ -47,6 +46,7 @@ contract zTokenPool is Operator {
         uint256 rewardBase_
     ) public {
         require(rewardBase_ > 0, "rewardBase must > 0");
+        require(zToken_ != rewardToken_, "The reward token cannot be the same token as zToken");
 
         zToken = IERC20(zToken_);
         rewardToken = IERC20(rewardToken_);
@@ -75,10 +75,6 @@ contract zTokenPool is Operator {
         }
         _;
     }
-
-    // function setStartTime(uint256 starttime_) public onlyOperator {
-    //     starttime = starttime_;
-    // }
 
     function lastTimeRewardApplicable() public view returns (uint256) {
         return Math.min(block.timestamp, periodFinish);

@@ -10,6 +10,7 @@ import '../utils/ContractGuard.sol';
 import '../utils/Epoch.sol';
 import '../interfaces/IRewardNotifier.sol';
 import '../interfaces/IAsset.sol';
+import '../interfaces/IOracle.sol';
 
 contract PoolWrapper {
     using SafeMath for uint256;
@@ -21,7 +22,8 @@ contract PoolWrapper {
     mapping(address => uint256) private _balances;
     mapping(address => uint256) private _lastStakeTimestamp;//最新抵押时间戳
 
-    uint256 public withdrawTime = 24 hours; //24小时内不能提币
+    //uint256 public withdrawTime = 24 hours; //24小时内不能提币
+    uint256 public withdrawTime = 1 hours; //24小时内不能提币
 
     modifier checkWithdraw(address account) {
         require(_lastStakeTimestamp[msg.sender].add(withdrawTime) < block.timestamp , "boardroom: can not whitdraw");
@@ -65,8 +67,15 @@ contract Boardroom is Epoch, PoolWrapper, ContractGuard, IRewardNotifier {
     using Address for address;
     using SafeMath for uint256;
 
+    address public oracle;
+
     //累计奖励
-    uint256 public accumulatedReward;
+    uint256 public accumulatedCount;
+    mapping(uint256 => uint256) public accumulatedHistory;
+    uint256 public accumulatedTotal;
+
+    address[] public tokenList;
+    mapping(address => uint256) public tokenAccumulatedTotal;
 
     //授权通知者
     mapping (address => bool) _notifier;
@@ -94,11 +103,13 @@ contract Boardroom is Epoch, PoolWrapper, ContractGuard, IRewardNotifier {
     /* ========== CONSTRUCTOR ========== */
 
     constructor(
+        address _oracle,
         IERC20 _rewardToken,
         IERC20 _token,
         uint256 _startTime,
         uint256 _period
     ) public Epoch(_period, _startTime, 0) {
+        oracle = _oracle;
         rewardToken = _rewardToken;
         token = _token;
 
@@ -134,9 +145,33 @@ contract Boardroom is Epoch, PoolWrapper, ContractGuard, IRewardNotifier {
         _;
     }
 
-    /* ========== VIEW FUNCTIONS ========== */
+    function accumulatedRewardOfIndex(uint256 index) public view returns(uint256) {
+        return accumulatedHistory[index];
+    }
 
-    // ============ reward notifier
+    function setWithdrawTime(uint256 _withdrawTime) public onlyOperator {
+        withdrawTime = _withdrawTime;
+    }
+
+    //token list
+    function addToken(address token) public onlyOperator {
+        tokenList.push(token);
+    }
+    
+    function tokenListLength() public view returns(uint256) {
+        return tokenList.length;
+    }
+
+    function getTokenOfIndex(uint256 index_) public view returns(address) {
+        return tokenList[index_];
+    }
+
+    //set oracle
+    function setOracle(address oracle_) public onlyOperator {
+        oracle = oracle_;
+    }
+
+    // ============ reward notifier 
     function setNotifier(address account) public onlyOperator {
         _notifier[account] = true;
     }
@@ -231,40 +266,41 @@ contract Boardroom is Epoch, PoolWrapper, ContractGuard, IRewardNotifier {
         }
     }
 
-    function withdrawBackend(address token_, address to_) external payable onlyOperator {
-        require(address(token_) != address(rewardToken) && address(token_) != address(token), "invalid token");
-
-        if (address(token_) == address(0)) {
-            safeTransferETH(to_, address(this).balance);
-            return;
-        }
-
-        uint256 balance = IAsset(token_).balanceOf(address(this));
-        IERC20(token_).safeTransfer(to_, balance);
-    }
-
-    function notify(uint256 amount) override external isRewardNotifier(msg.sender) {
-        accumulatedReward = accumulatedReward.add(amount);
+    function notify(address token_, uint256 amount_) override external isRewardNotifier(msg.sender) {
+        //每个token累计奖励
+        tokenAccumulatedTotal[token_] = tokenAccumulatedTotal[token_].add(amount_);
     }
 
     function allocateReward() 
         external
         onlyOneBlock
-        onlyOperator
         checkStartTime
         checkEpoch
     {
-        if (accumulatedReward == 0) {
-            return;
-        }
-        
         if (totalSupply() == 0) {
             return;
         }
 
+        uint256 accumulatedReward = 0;
+        for (uint256 i = 0; i < tokenList.length; i++) {
+            uint256 fee = tokenAccumulatedTotal[tokenList[i]];
+            uint256 amount = IOracle(oracle).R(tokenList[i], fee);
+            if (amount != 0) {
+                accumulatedReward = accumulatedReward.add(amount);
+                tokenAccumulatedTotal[tokenList[i]] = 0;
+            }
+        }
+
+        if (accumulatedReward == 0) {
+            return;
+        }
+        
         _allocateReward(accumulatedReward);
         
-        accumulatedReward = 0;
+        //统计每次奖励数据
+        accumulatedCount = accumulatedCount.add(1);
+        accumulatedHistory[accumulatedCount] = accumulatedReward;
+        accumulatedTotal = accumulatedTotal.add(accumulatedReward);
     }
 
     function _allocateReward(uint256 amount) internal {
@@ -284,13 +320,7 @@ contract Boardroom is Epoch, PoolWrapper, ContractGuard, IRewardNotifier {
 
         emit RewardAdded(msg.sender, amount);
     }
-    
-    function safeTransferETH(address to, uint value) internal {
-        (bool success,) = to.call{value:value}(new bytes(0));
-        require(success, 'boradroom: ETH_TRANSFER_FAILED');
-    }
 
-    receive() external payable {}
     /* ========== EVENTS ========== */
 
     event Staked(address indexed user, uint256 amount);

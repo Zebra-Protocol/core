@@ -5,22 +5,23 @@ import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import '@openzeppelin/contracts/token/ERC20/SafeERC20.sol';
 import '@openzeppelin/contracts/math/SafeMath.sol';
 import '@openzeppelin/contracts/utils/ReentrancyGuard.sol';
-import '@openzeppelin/contracts/access/Ownable.sol';
 import './lib/Math.sol';
 import './interfaces/Strategy.sol';
 import './interfaces/IMdexFactory.sol';
 import './interfaces/IMdexRouter.sol';
 import './interfaces/IMdexPair.sol';
 import './interfaces/IWHT.sol';
+import './access/Operator.sol';
 
 
-contract StrategyLiquidate is Ownable, ReentrancyGuard, Strategy {
+contract StrategyLiquidate is Operator, ReentrancyGuard, Strategy {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
 
     IMdexFactory public factory;
     IMdexRouter public router;
     address public wht;
+    mapping(address => bool) private goblins;
 
     /// @dev Create a new withdraw minimize trading strategy instance for mdx.
     /// @param _router The mdx router smart contract.
@@ -30,6 +31,18 @@ contract StrategyLiquidate is Ownable, ReentrancyGuard, Strategy {
         wht = _router.WHT();
     }
 
+    modifier onlyGoblin() {
+        require(
+            goblins[msg.sender] == true,
+            'operator: caller is not the goblin'
+        );
+        _;
+    }
+
+    function setGoblin(address goblin) public onlyOperator {
+        goblins[goblin] = true;
+    }
+    
     function safeTransferETH(address to, uint value) internal {
         (bool success,) = to.call{value:value}(new bytes(0));
         require(success, 'ETH_TRANSFER_FAILED');
@@ -45,6 +58,7 @@ contract StrategyLiquidate is Ownable, ReentrancyGuard, Strategy {
         external
         override
         payable
+        onlyGoblin
         nonReentrant
     {
         (address lpAddress) = abi.decode(data, (address));
@@ -105,7 +119,7 @@ contract StrategyLiquidate is Ownable, ReentrancyGuard, Strategy {
     /// @param token The token contract. Can be anything. This contract should not hold ERC20 tokens.
     /// @param to The address to send the tokens to.
     /// @param value The number of tokens to transfer to `to`.
-    function recover(address token, address to, uint256 value) external onlyOwner nonReentrant {
+    function recover(address token, address to, uint256 value) external onlyOperator nonReentrant {
         IERC20(token).safeTransfer(to, value);
     }
 

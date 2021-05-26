@@ -8,6 +8,7 @@ import '@openzeppelin/contracts/utils/ReentrancyGuard.sol';
 import '@openzeppelin/contracts/access/Ownable.sol';
 
 import './lib/Math.sol';
+import './lib/TokenSwapUtil.sol';
 import './interfaces/Strategy.sol';
 import './interfaces/IMdexFactory.sol';
 import './interfaces/IMdexRouter.sol';
@@ -48,54 +49,7 @@ contract StrategyAddTwoSidesOptimal is Ownable, ReentrancyGuard, Strategy {
     function myBalance(address token) internal view returns (uint) {
         return IERC20(token).balanceOf(address(this));
     }
-    /// @dev Compute optimal deposit amount
-    /// @param amtA amount of token A desired to deposit
-    /// @param amtB amonut of token B desired to deposit
-    /// @param resA amount of token A in reserve
-    /// @param resB amount of token B in reserve
-    function optimalDeposit(
-        uint256 amtA,
-        uint256 amtB,
-        uint256 resA,
-        uint256 resB
-    ) internal pure returns (uint256 swapAmt, bool isReversed) {
-        //0.1,0,1,0.1
-        if (amtA.mul(resB) >= amtB.mul(resA)) {
-            swapAmt = _optimalDepositA(amtA, amtB, resA, resB);//0.1,0,1,0.1
-            isReversed = false;
-        } else {
-            swapAmt = _optimalDepositA(amtB, amtA, resB, resA);
-            isReversed = true;
-        }
-    }
-
-    /// @dev Compute optimal deposit amount helper
-    /// @param amtA amount of token A desired to deposit
-    /// @param amtB amonut of token B desired to deposit
-    /// @param resA amount of token A in reserve
-    /// @param resB amount of token B in reserve
-    function _optimalDepositA(
-        uint256 amtA,
-        uint256 amtB,
-        uint256 resA,
-        uint256 resB
-    ) internal pure returns (uint256) {
-        //0.1,0,1,0.1
-        require(amtA.mul(resB) >= amtB.mul(resA), "Reversed");
-        uint256 a = 997;
-        uint256 b = uint256(1997).mul(resA);
-        uint256 _c = (amtA.mul(resB)).sub(amtB.mul(resA));
-        uint256 c = _c.mul(1000).div(amtB.add(resB)).mul(resA);
-
-        uint256 d = a.mul(c).mul(4);
-        uint256 e = Math.sqrt(b.mul(b).add(d));
-
-        uint256 numerator = e.sub(b);
-        uint256 denominator = a.mul(2);
-
-        return numerator.div(denominator);
-    }
-
+    
     /// @dev Execute worker strategy. Take LP tokens + debtToken. Return LP tokens.
     /// @param user User address
     /// @param borrowToken The token user borrow from bank.
@@ -155,7 +109,7 @@ contract StrategyAddTwoSidesOptimal is Ownable, ReentrancyGuard, Strategy {
         address tokenRelative;
         {
             borrowToken = borrowToken == address(0) ? wht : borrowToken;
-            tokenRelative = borrowToken == lpToken.token0() ? token1 : token0;
+            tokenRelative = borrowToken == lpToken.token0() ? lpToken.token1() : lpToken.token0();
 
             IERC20(borrowToken).safeApprove(address(router), 0);
             IERC20(borrowToken).safeApprove(address(router), uint256(-1));
@@ -205,8 +159,9 @@ contract StrategyAddTwoSidesOptimal is Ownable, ReentrancyGuard, Strategy {
         (uint256 debtReserve, uint256 relativeReserve) = borrowToken ==
             lpToken.token0() ? (token0Reserve, token1Reserve) : (token1Reserve, token0Reserve);
 
-        (uint256 swapAmt, bool isReversed) = optimalDeposit(myBalance(borrowToken), myBalance(tokenRelative),
+        (uint256 swapAmt, bool isReversed) = TokenSwapUtil.optimalDeposit(myBalance(borrowToken), myBalance(tokenRelative),
             debtReserve, relativeReserve);//0.1,0,1,0.1
+
         if (swapAmt > 0){
             address[] memory path = new address[](2);
             (path[0], path[1]) = isReversed ? (tokenRelative, borrowToken) : (borrowToken, tokenRelative);

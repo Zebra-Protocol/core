@@ -14,27 +14,32 @@ contract TripleSlopeModel is Operator,InterestModel {
     uint256 public level4Rate;
 
     function setRateType(uint8 _rateType) public onlyOperator {
+        require(_rateType>0&&_rateType<(10 ** 18), 'Illegal value range');
         rateType = _rateType;
     }
 
     function setLevel1Rate(uint256 _level1Rate) public onlyOperator {
+        require(_level1Rate>0&&_level1Rate<(10 ** 18), 'Illegal value range');
         level1Rate = _level1Rate;
     }
 
     function setLevel2Rate(uint256 _level2Rate) public onlyOperator {
+        require(_level2Rate>0&&_level2Rate<(10 ** 18), 'Illegal value range');
         level2Rate = _level2Rate;
     }
 
     function setLevel3Rate(uint256 _level3Rate) public onlyOperator {
+        require(_level3Rate>0&&_level3Rate<(10 ** 18), 'Illegal value range');
         level3Rate = _level3Rate;
     }
 
     function setLevel4Rate(uint256 _level4Rate) public onlyOperator {
+        require(_level4Rate>0&&_level4Rate<(10 ** 18), 'Illegal value range');
         level4Rate = _level4Rate;
     }
 
-    function getInterestRate(uint256 debt, uint256 floating) external override view returns (uint256) {
-        uint256 total = debt.add(floating);
+    function getInterestRate(uint256 debt, uint256 totalBalance) external override view returns (uint256) {
+        uint256 total = debt.add(totalBalance);
         uint256 utilization = total == 0? 0: debt.mul(10000).div(total);
         if (rateType==0) {
             if (utilization < 5000) {

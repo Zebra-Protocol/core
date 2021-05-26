@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.0;
 
-import './access/Operator.sol';
 import '@openzeppelin/contracts/math/SafeMath.sol';
 
-contract ZBT is Operator {
+contract ZBT {
     using SafeMath for uint256;
 
     mapping (address => uint256) private _balances;
@@ -17,15 +16,21 @@ contract ZBT is Operator {
     string private _symbol;
     uint8 private _decimals;
 
-    constructor() public {
+    constructor(uint256 supply_) public {
         _name     = "ZBT";
         _symbol   = "ZBT";
         _decimals = 18;
+
+        _mint(msg.sender, supply_ * 10**18);
     }
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
+    function _msgSender() internal view returns (address payable) {
+        return msg.sender;
+    }
+    
     /*
         ERC-20 Protocol
     */
@@ -77,14 +82,6 @@ contract ZBT is Operator {
     function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
         _approve(_msgSender(), spender, _allowances[_msgSender()][spender].sub(subtractedValue, "ERC20: decreased allowance below zero"));
         return true;
-    }
-
-    function mint(address account, uint256 amount) external onlyOperator {
-        _mint(account, amount);
-    }
-
-    function burn(address account, uint256 amount) external onlyOperator {
-        _burn(account, amount);
     }
 
     function _transfer(address sender, address recipient, uint256 amount) internal virtual {

@@ -63,9 +63,5 @@ contract Epoch is Operator {
     function setPeriod(uint256 _period) external onlyOperator {
         period = _period;
     }
-    
-    function setStartTime(uint256 starttime_) public onlyOperator {
-        startTime = starttime_;
-    }
 
 }

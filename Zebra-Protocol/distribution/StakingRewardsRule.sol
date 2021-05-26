@@ -28,8 +28,10 @@ contract StakingRewardsRule is
     mapping(address => uint256) private _balances;
 
     IERC20 public rewardToken;
+
+    address private goblin;
     //require modify
-    uint256 public constant DURATION = 1 minutes;
+    uint256 public constant DURATION = 7 days;
 
     uint256 public constant TOTAL_PERIOD = 6;//It lasts for 6 weeks
 
@@ -59,6 +61,8 @@ contract StakingRewardsRule is
         uint256 rewardBase_,
         uint256 starttime_
     ) public {
+        require(stakingToken_ != address(0), 'LPT token address cannot be 0 address');
+
         rewardToken = IERC20(rewardToken_);
         lpt = IERC20(stakingToken_);
         rewardBase = rewardBase_;
@@ -88,8 +92,8 @@ contract StakingRewardsRule is
         require(success, 'ETH_TRANSFER_FAILED');
     }
 
-    function setStartTime(uint256 starttime_) public onlyOperator {
-        starttime = starttime_;
+    function setGoblin(address _goblin) public onlyOperator {
+        goblin = _goblin;
     }
 
     function lastTimeRewardApplicable() public override view returns (uint256) {
@@ -127,6 +131,7 @@ contract StakingRewardsRule is
         public
         override
         updateReward(user)
+        onlyGoblin
         checkhalve
         checkStart
     {
@@ -135,9 +140,8 @@ contract StakingRewardsRule is
 
         _totalSupply = _totalSupply.add(amount);
         _balances[user] = _balances[user].add(amount);
-        if(address(lpt) != address(0)) {
-            lpt.safeTransferFrom(msg.sender, address(this), amount);
-        }
+        lpt.safeTransferFrom(msg.sender, address(this), amount);
+        
         emit Staked(user, amount);
     }
 
@@ -145,6 +149,7 @@ contract StakingRewardsRule is
         public
         override
         updateReward(user)
+        onlyGoblin
         checkhalve
     {
         require(amount > 0, 'Cannot withdraw 0');
@@ -167,21 +172,16 @@ contract StakingRewardsRule is
         emit Withdrawn(user, amount);
     }
 
-    function exit(address user) external override {
-        withdraw(balanceOf(user),user);
-        getReward(user);
-    }
-
     function getRewardForDuration() external override view returns (uint256) {
         return rewardRate.mul(DURATION);
     }
     
-    function getReward(address user) public override updateReward(user) checkhalve {
-        uint256 reward = earned(user);
+    function getReward() public override updateReward(msg.sender) checkhalve {
+        uint256 reward = earned(msg.sender);
         if (reward > 0) {
-            rewards[user] = 0;
-            rewardToken.safeTransfer(user, reward);
-            emit RewardPaid(user, reward);
+            rewards[msg.sender] = 0;
+            rewardToken.safeTransfer(msg.sender, reward);
+            emit RewardPaid(msg.sender, reward);
         }
     }
 
@@ -204,7 +204,14 @@ contract StakingRewardsRule is
         require(block.timestamp >= starttime, 'not start');
         _;
     }
-
+    
+    modifier onlyGoblin() {
+        require(
+            goblin == msg.sender,
+            'operator: caller is not the goblin'
+        );
+        _;
+    }
     function notifyRewardAmount(uint256 reward)
         external
         override

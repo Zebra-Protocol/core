@@ -9,7 +9,6 @@ import './interfaces/IAsset.sol';
 import './interfaces/IBankConfig.sol';
 import './interfaces/Goblin.sol';
 import './interfaces/IEIP20.sol';
-import './interfaces/IOracle.sol';
 import './interfaces/IRewardNotifier.sol';
 import './access/Operator.sol';
 
@@ -27,16 +26,23 @@ contract Bank is Operator, ReentrancyGuard {
         bool isOpen;
         bool canDeposit;
         bool canWithdraw;
-        uint256 totalVal;
+        uint256 totalVal;//deposit存入
         uint256 totalDebt;
         uint256 totalDebtShare;
+        uint256 totalInterest;
         uint256 totalReserve;
+        uint256 totalBoardroom;
+        uint256 totalPlatform;
         uint256 lastInterestTime;
     }
 
+    struct TokenInterest {
+        uint256 canReserveInterest;
+        uint256 canBoardroomInterest;
+        uint256 canPlatformInterest;
+    }
+
     struct Production {
-        address coinToken;
-        address currencyToken;
         address borrowToken;
         bool isOpen;
         bool canBorrow;
@@ -50,12 +56,13 @@ contract Bank is Operator, ReentrancyGuard {
         address owner;
         uint256 productionId;
         uint256 debtShare;
+        uint256 lptAmount;
+        uint256 loanAmount;
     }
 
     IBankConfig config;
 
-    address public oracle;
-    address public tokenWapper;
+    address public wht;
     address public boardroom;
 
     mapping(address => TokenBank) public banks;
@@ -66,7 +73,12 @@ contract Bank is Operator, ReentrancyGuard {
     mapping(uint256 => Position) public positions;
     uint256 public currentPos = 1;
 
-    uint256 public feeRatio = 100;
+    mapping(address => TokenInterest) public tokenInterests;
+
+    //token->user
+    mapping(address => address[]) public tokenUsers;
+
+    mapping(address=>uint256[]) myPositionIDList; 
 
     modifier onlyEOA() {
         require(msg.sender == tx.origin, "not eoa");
@@ -74,31 +86,43 @@ contract Bank is Operator, ReentrancyGuard {
     }
 
     constructor(
-        address tokenWapper_,
-        address oracle_,
+        address _wht,
         address boardroom_) public {
 
-        tokenWapper = tokenWapper_;
-        oracle = oracle_;
+        wht = _wht;
         boardroom = boardroom_;
     }
 
-    function setFeeRatio(uint256 _feeRatio) public onlyOperator {
-        feeRatio = _feeRatio;
+    //view
+    function getMyPositionIDList(address account) public view returns(uint256[] memory) {
+        return myPositionIDList[account];
     }
 
-    function positionInfo(uint256 posId) public view returns (uint256, uint256, uint256, address) {
-        Position storage pos = positions[posId];
-        Production storage prod = productions[pos.productionId];
+    function setBoardroom(address boardroom_) public onlyOperator {
+        boardroom = boardroom_;
+    }
+
+    function positionInfo(uint256 posId) public view returns (uint256, uint256, uint256, uint256, uint256, address) {
+        require((posId>=0&&posId<currentPos), 'Illegal position ID');
+
+        Position memory pos = positions[posId];
+        Production memory prod = productions[pos.productionId];
+        
+        uint256 lptAmount = pos.lptAmount;
+        uint256 totalBalance = prod.borrowToken == address(0)? address(this).balance: myBalance(prod.borrowToken);
+        uint256 posDebt = debtShareToVal(prod.borrowToken, pos.debtShare);
+        uint256 totalAsset = banks[prod.borrowToken].totalDebt.add(totalBalance);
 
         return (pos.productionId, Goblin(prod.goblin).health(posId, prod.borrowToken),
-            debtShareToVal(prod.borrowToken, pos.debtShare), pos.owner);
+            posDebt, totalAsset, lptAmount, pos.owner);
     }
 
-    function tokenInfo(address token) public view returns (uint256, uint256, uint256, uint256) {
+    function tokenInfo(address token) public view returns (uint256, uint256, uint256) {
         TokenBank storage bank = banks[token];
-        return (bank.totalVal, bank.totalDebt,
-        bank.totalDebtShare, bank.totalReserve);
+        uint256 totalBalance = token == address(0)? address(this).balance: myBalance(token);
+
+        return (bank.totalDebt, totalBalance.add(bank.totalDebt),
+            config.getInterestRate(bank.totalDebt, totalBalance));
     }
 
     function myBalance(address token) internal view returns (uint) {
@@ -115,9 +139,11 @@ contract Bank is Operator, ReentrancyGuard {
         require(bank.isOpen, 'token not exists');
 
         uint balance = token == address(0)? address(this).balance: myBalance(token);
+        /*这里有可能直接向银行转帐（不会影响bank.totalVal的变化），而不是通过合成资产存入的资产,
+        所以要取balance与bank.totalVal中的最小值*/
         balance = bank.totalVal < balance? bank.totalVal: balance;
 
-        return balance.add(bank.totalDebt).sub(bank.totalReserve);
+        return balance.add(bank.totalDebt).sub(bank.totalReserve).sub(bank.totalBoardroom).sub(bank.totalPlatform);
     }
 
     function debtShareToVal(address token, uint256 debtShare) public view returns (uint256) {
@@ -147,46 +173,49 @@ contract Bank is Operator, ReentrancyGuard {
         } else {
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
-       
         bank.totalVal = bank.totalVal.add(amount);
+        uint256 total = totalToken(token).sub(amount);
+        uint256 zTotal = IAsset(bank.zTokenAddr).totalSupply();
 
-        uint256 tokenDecimal = uint256(IEIP20(token==address(0)?tokenWapper:token).decimals());
+        uint256 tokenDecimal = uint256(IEIP20(token==address(0)?wht:token).decimals());
         uint256 zTokenDecimal = uint256(IEIP20(bank.zTokenAddr).decimals());
-        
+    
         //require covner unit
-        uint256 zAmount = amount.mul(zTokenDecimal).div(tokenDecimal);
-        IAsset(bank.zTokenAddr).mint(msg.sender, zAmount);
+        uint256 rAmount = amount.mul(10**zTokenDecimal).div(10**tokenDecimal);
+        uint256 rTotal = total.mul(10**zTokenDecimal).div(10**tokenDecimal);
+
+        uint256 pAmount = (rTotal == 0 || zTotal == 0) ? rAmount: rAmount.mul(zTotal).div(rTotal);
+
+        IAsset(bank.zTokenAddr).mint(msg.sender, pAmount);
     }
 
-    function withdraw(address token, uint256 pAmount) external nonReentrant {
+    function withdraw(address token, uint256 zAmount) external nonReentrant {
         TokenBank storage bank = banks[token];
-
-        require(bank.isOpen && bank.canWithdraw, 'Token not exist or cannot withdraw');
-        require(IAsset(bank.zTokenAddr).balanceOf(msg.sender) >= pAmount, 'zToken: withdraw execced balance');
+        require(IAsset(bank.zTokenAddr).balanceOf(msg.sender) >= zAmount, 'zToken: withdraw execced balance');
 
         calInterest(token);
 
-        uint256 tokenDecimal = uint256(IEIP20(token==address(0)?tokenWapper:token).decimals());
+        uint256 tokenDecimal = uint256(IEIP20(token==address(0)?wht:token).decimals());
         uint256 zTokenDecimal = uint256(IEIP20(bank.zTokenAddr).decimals());
+        uint256 total = totalToken(token);
 
-        uint256 tAmount = pAmount.mul(tokenDecimal).div(zTokenDecimal);
+        //require covner unit
+        uint256 rTotal = total.mul(10**zTokenDecimal).div(10**tokenDecimal);
+
+        uint256 amount = zAmount.mul(rTotal).div(IAsset(bank.zTokenAddr).totalSupply());
+        
+        //require covner unit
+        uint256 tAmount = amount.mul(10**tokenDecimal).div(10**zTokenDecimal);
+
         bank.totalVal = bank.totalVal.sub(tAmount);
 
-        uint256 fee = tAmount.mul(feeRatio).div(10000); ////手续费：1%
-        uint256 detal = tAmount.sub(fee); //实际到账
-
-        uint256 ZBTAmount = calcZBT(fee); //计算ZBT
-
-        IAsset(bank.zTokenAddr).burnFrom(msg.sender, pAmount);
+         IAsset(bank.zTokenAddr).burnFrom(msg.sender, zAmount);
 
         if (token == address(0)) {//HT
-            safeTransferETH(msg.sender, detal);
-            safeTransferETH(boardroom, fee);
+            safeTransferETH(msg.sender, tAmount);
         } else {
-            IERC20(token).safeTransfer(msg.sender, detal);
-            IERC20(token).safeTransfer(boardroom, fee);
+            IERC20(token).safeTransfer(msg.sender, tAmount);
         }
-        IRewardNotifier(boardroom).notify(ZBTAmount);
     }
 
     function opPosition(uint256 posId, uint256 pid, uint256 borrow, bytes calldata data)
@@ -197,18 +226,19 @@ contract Bank is Operator, ReentrancyGuard {
             currentPos ++;
             positions[posId].owner = msg.sender;
             positions[posId].productionId = pid;
-
+            myPositionIDList[msg.sender].push(posId);
         } else {
             require(posId < currentPos, "bad position id");
             require(positions[posId].owner == msg.sender, "not position owner");
+            require(pid == positions[posId].productionId, "Each position can only borrow the same token");
 
             pid = positions[posId].productionId;
         }
-
         Production storage production = productions[pid];
         require(production.isOpen, 'Production not exists');
 
         require(borrow == 0 || production.canBorrow, "Production can not borrow");
+    
         calInterest(production.borrowToken);
 
         uint256 debt = _removeDebt(positions[posId], production).add(borrow);
@@ -226,8 +256,12 @@ contract Bank is Operator, ReentrancyGuard {
             beforeToken = beforeToken.sub(borrow);
             IERC20(production.borrowToken).safeApprove(production.goblin, borrow);
         }
-        Goblin(production.goblin).work{value:sendHT}(posId, msg.sender, production.borrowToken, borrow, debt, data);
-
+        
+        {
+            uint256 lptAmount = Goblin(production.goblin).work{value:sendHT}(posId, msg.sender, production.borrowToken, borrow, debt, data);
+            positions[posId].lptAmount = lptAmount;
+        }
+        
         uint256 backToken = isBorrowHt? (address(this).balance.sub(beforeToken)) :
             myBalance(production.borrowToken).sub(beforeToken);
 
@@ -240,6 +274,9 @@ contract Bank is Operator, ReentrancyGuard {
 
         } else if (debt > backToken) { //have loan
             debt = debt.sub(backToken);
+            if(borrow > 0) {
+                positions[posId].loanAmount = positions[posId].loanAmount.add(borrow.sub(backToken));
+            }
             backToken = 0;
 
             require(debt >= production.minDebt, "too small debt size");
@@ -252,15 +289,131 @@ contract Bank is Operator, ReentrancyGuard {
         emit OpPosition(posId, debt, backToken);
     }
 
+    function updateConfig(IBankConfig _config) external onlyOperator {
+        config = _config;
+    }
+
+    function addToken(address token, address zToken) external onlyOperator {
+        TokenBank storage bank = banks[token];
+        require(!bank.isOpen, 'token already exists');
+
+        bank.isOpen = true;
+        bank.tokenAddr = token;
+        bank.zTokenAddr = zToken;
+        bank.canDeposit = true;
+        bank.canWithdraw = true;
+        bank.totalVal = 0;
+        bank.totalDebt = 0;
+        bank.totalDebtShare = 0;
+        bank.totalInterest = 0;
+        bank.totalReserve = 0;
+        bank.totalBoardroom = 0;
+        bank.totalPlatform = 0;
+        bank.lastInterestTime = now;
+    }
+
+    function updateToken(address token, bool canDeposit, bool canWithdraw) external onlyOperator {
+        TokenBank storage bank = banks[token];
+        require(bank.isOpen, 'token not exists');
+
+        bank.canDeposit = canDeposit;
+        bank.canWithdraw = canWithdraw;
+    }
+
+    function opProduction(uint256 pid, bool isOpen, bool canBorrow,
+        address borrowToken, address goblin,
+        uint256 minDebt, uint256 openFactor, uint256 liquidateFactor) external onlyOperator {
+
+        if(pid == 0){
+            pid = currentPid;
+            currentPid ++;
+        } else {
+            require(pid < currentPid, "bad production id");
+        }
+
+        Production storage production = productions[pid];
+        production.isOpen = isOpen;
+        production.canBorrow = canBorrow;
+        
+        production.borrowToken = borrowToken;
+        production.goblin = goblin;
+
+        production.minDebt = minDebt;
+        production.openFactor = openFactor;
+        production.liquidateFactor = liquidateFactor;
+    }
+
+    function calInterest(address token) public {
+        TokenBank storage bank = banks[token];
+        require(bank.isOpen, 'token not exists');
+
+        if (now > bank.lastInterestTime) {
+            uint256 timePast = now.sub(bank.lastInterestTime);
+            uint256 totalDebt = bank.totalDebt;
+            //uint256 totalBalance = totalToken(token);
+            uint totalBalance = token == address(0)? address(this).balance: myBalance(token);
+
+            uint256 ratePerSec = config.getInterestRate(totalDebt, totalBalance);
+            uint256 interest = ratePerSec.mul(timePast).mul(totalDebt).div(1e18);
+            
+            uint256 toReserve = interest.mul(config.getReserveBps()).div(10000);
+            uint256 toBoardroom = interest.mul(config.getBoardroomBps()).div(10000);
+            uint256 toPlatform = interest.mul(config.getPlatformBps()).div(10000);
+            
+            _rewardToBoardroom(token, toBoardroom);
+
+            uint256 restInterest = interest.sub(toReserve).sub(toBoardroom).sub(toPlatform);
+            bank.totalInterest = bank.totalInterest.add(restInterest);
+            bank.totalReserve = bank.totalReserve.add(toReserve);
+            bank.totalBoardroom = bank.totalBoardroom.add(toBoardroom);
+            bank.totalPlatform = bank.totalPlatform.add(toPlatform);
+            bank.totalDebt = bank.totalDebt.add(interest);
+            bank.lastInterestTime = now;
+        }
+    }
+
+    function withdrawalFunds(address token, address to, uint256 value, uint drawType) external onlyOperator nonReentrant {
+        require(drawType >= 0&&drawType < 3, 'Incorrect draw type');
+
+        TokenBank storage bank = banks[token];
+        require(bank.isOpen, 'token not exists');
+ 
+        if(drawType==0) {//Reserve
+            require(value <= tokenInterests[token].canReserveInterest, 'There are not enough reserve balance');
+            bank.totalReserve = bank.totalReserve.sub(value);
+            tokenInterests[token].canReserveInterest = tokenInterests[token].canReserveInterest.sub(value);
+        } else if(drawType==1) {//Boardroom
+            require(value <= tokenInterests[token].canBoardroomInterest, 'There are not enough boardroom balance');
+            bank.totalBoardroom = bank.totalBoardroom.sub(value);
+            tokenInterests[token].canBoardroomInterest = tokenInterests[token].canBoardroomInterest.sub(value);
+        } else if(drawType==2) {//Platform
+            require(value <= tokenInterests[token].canPlatformInterest, 'There are not enough platform balance');
+            bank.totalPlatform = bank.totalPlatform.sub(value); 
+            tokenInterests[token].canPlatformInterest = tokenInterests[token].canPlatformInterest.sub(value);
+        }
+
+        uint balance = token == address(0)? address(this).balance: myBalance(token);
+        //非deposit存入,这里有可能直接向银行转帐（不会影响bank.totalVal的变化），而不是通过合成资产存入的资产
+        if(balance < bank.totalVal.add(value)) {
+            bank.totalVal = bank.totalVal.sub(value);
+        }
+
+        if (token == address(0)) {
+            safeTransferETH(to, value);
+        } else {
+            IERC20(token).safeTransfer(to, value);
+        }
+    }
+
     function liquidate(uint256 posId) external payable onlyEOA nonReentrant {
         Position storage pos = positions[posId];
-        require(pos.debtShare > 0, "no debt");
+        require(pos.debtShare > 0, "liquidate:no debt");
         Production storage production = productions[pos.productionId];
 
         calInterest(production.borrowToken);
 
         uint256 debt = _removeDebt(pos, production);
-
+        
         uint256 health = Goblin(production.goblin).health(posId, production.borrowToken);
         //require modify
         require(health.mul(production.liquidateFactor) < debt.mul(10000), "can't liquidate");
@@ -281,13 +434,55 @@ contract Bank is Operator, ReentrancyGuard {
         if (prize > 0) {
             isHT? safeTransferETH(msg.sender, prize): IERC20(production.borrowToken).safeTransfer(msg.sender, prize);
         }
+        
+        positions[posId].lptAmount = 0;//清除仓位
+        positions[posId].loanAmount = 0;
+
         if (rest > debt) {
             left = rest.sub(debt);
+
+            _calEnabledInterest(production.borrowToken, debt.sub(positions[posId].loanAmount));
+
             isHT? safeTransferETH(pos.owner, left): IERC20(production.borrowToken).safeTransfer(pos.owner, left);
         } else {
             banks[production.borrowToken].totalVal = banks[production.borrowToken].totalVal.sub(debt).add(rest);
         }
+    
         emit Liquidate(posId, msg.sender, prize, left);
+    }
+
+    function harvest(uint256 posId, bytes calldata data) external onlyEOA nonReentrant {
+        Position storage pos = positions[posId];
+
+        Production storage production = productions[pos.productionId];
+
+        calInterest(production.borrowToken);
+
+        uint256 debt = _removeDebt(pos, production);
+
+        bool isHT = production.borrowToken == address(0);
+        uint256 before = isHT? address(this).balance: myBalance(production.borrowToken);
+
+        positions[posId].lptAmount = 0;
+        positions[posId].loanAmount = 0;
+
+        Goblin(production.goblin).work(posId, msg.sender, production.borrowToken, uint256(0), debt, data);
+        
+        uint256 back = isHT? address(this).balance: myBalance(production.borrowToken);
+
+        back = back.sub(before);
+
+        uint256 left = 0;
+        if (back > debt) {
+            left = back.sub(debt);
+            
+            _calEnabledInterest(production.borrowToken, debt.sub(positions[posId].loanAmount));
+            
+            isHT? safeTransferETH(pos.owner, left): IERC20(production.borrowToken).safeTransfer(pos.owner, left);
+        } else {
+            banks[production.borrowToken].totalVal = banks[production.borrowToken].totalVal.sub(debt).add(back);
+        }
+        emit Harvest(posId, msg.sender, back, left);
     }
 
     function _addDebt(Position storage pos, Production storage production, uint256 debtVal) internal {
@@ -316,140 +511,28 @@ contract Bank is Operator, ReentrancyGuard {
             bank.totalVal = bank.totalVal.add(debtVal);
             bank.totalDebtShare = bank.totalDebtShare.sub(debtShare);
             bank.totalDebt = bank.totalDebt.sub(debtVal);
+
             return debtVal;
         } else {
             return 0;
         }
     }
 
-    function updateConfig(IBankConfig _config) external onlyOperator {
-        config = _config;
-    }
-
-    function addToken(address token, address zToken) external onlyOperator {
-        TokenBank storage bank = banks[token];
-        require(!bank.isOpen, 'token already exists');
-
-        bank.isOpen = true;
-        bank.tokenAddr = token;
-        bank.zTokenAddr = zToken;
-        bank.canDeposit = true;
-        bank.canWithdraw = true;
-        bank.totalVal = 0;
-        bank.totalDebt = 0;
-        bank.totalDebtShare = 0;
-        bank.totalReserve = 0;
-        bank.lastInterestTime = now;
-    }
-
-    function updateToken(address token, bool canDeposit, bool canWithdraw) external onlyOperator {
-        TokenBank storage bank = banks[token];
-        require(bank.isOpen, 'token not exists');
-
-        bank.canDeposit = canDeposit;
-        bank.canWithdraw = canWithdraw;
-    }
-
-    function opProduction(uint256 pid, bool isOpen, bool canBorrow,
-        address coinToken, address currencyToken, address borrowToken, address goblin,
-        uint256 minDebt, uint256 openFactor, uint256 liquidateFactor) external onlyOperator {
-
-        if(pid == 0){
-            pid = currentPid;
-            currentPid ++;
-        } else {
-            require(pid < currentPid, "bad production id");
-        }
-
-        Production storage production = productions[pid];
-        production.isOpen = isOpen;
-        production.canBorrow = canBorrow;
+    function _calEnabledInterest(address borrowToken, uint256 interest) internal {
+        uint256 toReserve = interest.mul(config.getReserveBps()).div(10000);
+        uint256 toBoardroom = interest.mul(config.getBoardroomBps()).div(10000);
+        uint256 toPlatform = interest.mul(config.getPlatformBps()).div(10000);
         
-        production.coinToken = coinToken;
-        production.currencyToken = currencyToken;
-        production.borrowToken = borrowToken;
-        production.goblin = goblin;
-
-        production.minDebt = minDebt;
-        production.openFactor = openFactor;
-        production.liquidateFactor = liquidateFactor;
+        tokenInterests[borrowToken].canReserveInterest = tokenInterests[borrowToken].canReserveInterest.add(toReserve);
+        tokenInterests[borrowToken].canBoardroomInterest = tokenInterests[borrowToken].canReserveInterest.add(toBoardroom);
+        tokenInterests[borrowToken].canPlatformInterest = tokenInterests[borrowToken].canReserveInterest.add(toPlatform);
     }
 
-    function calInterest(address token) public {
-        TokenBank storage bank = banks[token];
-        require(bank.isOpen, 'token not exists');
 
-        if (now > bank.lastInterestTime) {
-            uint256 timePast = now.sub(bank.lastInterestTime);
-            uint256 totalDebt = bank.totalDebt;
-            uint256 totalBalance = totalToken(token);
-
-            uint256 ratePerSec = config.getInterestRate(totalDebt, totalBalance);
-            uint256 interest = ratePerSec.mul(timePast).mul(totalDebt).div(1e18);
-
-            uint256 toReserve = interest.mul(config.getReserveBps()).div(10000);
-            bank.totalReserve = bank.totalReserve.add(toReserve);
-            bank.totalDebt = bank.totalDebt.add(interest);
-            bank.lastInterestTime = now;
-        }
-    }
-
-    function withdrawReserve(address token, address to, uint256 value) external onlyOperator nonReentrant {
-        TokenBank storage bank = banks[token];
-        require(bank.isOpen, 'token not exists');
-
-        uint balance = token == address(0)? address(this).balance: myBalance(token);
-        if(balance >= bank.totalVal.add(value)) {
-            //no deposit in
-        } else {
-            bank.totalReserve = bank.totalReserve.sub(value);
-            bank.totalVal = bank.totalVal.sub(value);
-        }
-
-        if (token == address(0)) {
-            safeTransferETH(to, value);
-        } else {
-            IERC20(token).safeTransfer(to, value);
-        }
-    }
-
-    function harvest(uint256 posId, bytes calldata data) external onlyEOA nonReentrant {
-        Position storage pos = positions[posId];
-        require(pos.debtShare > 0, "no debt");
-        Production storage production = productions[pos.productionId];
-
-        calInterest(production.borrowToken);
-
-        uint256 debt = _removeDebt(pos, production);
-
-        bool isHT = production.borrowToken == address(0);
-        uint256 before = isHT? address(this).balance: myBalance(production.borrowToken);
-
-        Goblin(production.goblin).work(posId, msg.sender, production.borrowToken, uint256(0), debt, data);
-        
-        uint256 back = isHT? address(this).balance: myBalance(production.borrowToken);
-
-        back = back.sub(before);
-        uint256 left = 0;
-        if (back > debt) {
-            left = back.sub(debt);
-            isHT? safeTransferETH(pos.owner, left): IERC20(production.borrowToken).safeTransfer(pos.owner, left);
-        } else {
-            banks[production.borrowToken].totalVal = banks[production.borrowToken].totalVal.sub(debt).add(back);
-        }
-        emit Harvest(posId, msg.sender, back, left);
-    }
-
-    function calcZBT(uint256 amount) public view returns (uint256) {
-        return _calcZBT(amount);
-    }
-
-    function _calcZBT(uint256 amount) internal view returns (uint256) {
-
-        try IOracle(oracle).R(tokenWapper, amount) returns (uint256 price) {
-            return price;
-        } catch {
-            revert('Treasury: failed to consult cash price from the oracle');
+    function _rewardToBoardroom(address token, uint256 fee) internal {
+        if(fee > 0) {
+            token = token == address(0) ? wht : token;
+            IRewardNotifier(boardroom).notify(token, fee);
         }
     }
 

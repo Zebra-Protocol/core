@@ -1,43 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.0;
 
-import '@openzeppelin/contracts/math/Math.sol';
 import '@openzeppelin/contracts/math/SafeMath.sol';
 import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import '@openzeppelin/contracts/utils/Address.sol';
 import '@openzeppelin/contracts/token/ERC20/SafeERC20.sol';
 
 import '../access/Operator.sol';
-import '../uniswap/IUniswapV2Pair.sol';
-import '../uniswap/IUniswapV2Factory.sol';
-import '../uniswap/IUniswapV2Router02.sol';
+import '../interfaces/IMdexPair.sol';
+import '../interfaces/IMdexFactory.sol';
+import '../interfaces/IMdexRouter.sol';
+import '../interfaces/IWHT.sol';
+import '../lib/Math.sol';
+import '../lib/TokenSwapUtil.sol';
 
 contract ZBTLPTokenPool is Operator {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
-    //debug
-    address public path0;
-    address public path1;
-    uint256 public dvalue1;
-    uint256 public dvalue2;
-    uint256 public dvalue3;
-    uint256 public dvalue_total1;
-    uint256 public dvalue_total2;
-    uint256 public dvalue_total4;
-    uint256 public dvalue_liquidity;
-    uint public dvalue_amountToken;
-    uint public dvalue_amountETH;
-
     //交易对(A-B)
     address public WETH;
     address public tokenA;
     address public tokenB;
-    IUniswapV2Pair public lpToken;
+    IMdexPair public lpToken;
     address public rewardToken;
 
-    IUniswapV2Factory public factory;
-    IUniswapV2Router02 public router;
+    IMdexFactory public factory;
+    IMdexRouter public router;
 
     uint256 public duration; //周期长度
     uint256 public duration1 = 7 days; //第1阶段周期（1周）
@@ -67,12 +56,12 @@ contract ZBTLPTokenPool is Operator {
     event RewardPaid(address indexed user, uint256 reward);
 
     constructor(
-        IUniswapV2Factory factory_,
-        IUniswapV2Router02 router_,
+        IMdexFactory factory_,
+        IMdexRouter router_,
         address tokenA_,
         address tokenB_,
         address WETH_,
-        IUniswapV2Pair lpToken_,
+        IMdexPair lpToken_,
         address rewardToken_,
         uint256 rewardBase_
     ) public {
@@ -143,109 +132,76 @@ contract ZBTLPTokenPool is Operator {
                 .add(rewards[account]);
     }
 
-    function stake2(address token_, uint256 amount)
+    function stake2(address token0, address token1,  uint256 token0Amount,  uint256 token1Amount)
         public
         payable
         updateReward(msg.sender)
         checkhalve
         checkStart
     {
-        require(token_ == tokenA || token_ == tokenB, 'LPPool: invalid token');
-        
-        if (tokenA == WETH || tokenB == WETH) {
-            if (token_ == WETH) {
-                amount = msg.value;
-            } else {
-                IERC20(token_).safeTransferFrom(msg.sender, address(this), amount);
-            }
-        } else {
-            IERC20(token_).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 token0Before = token0 == address(0)? address(this).balance.sub(msg.value): IERC20(token0).balanceOf(address(this));
+        uint256 token1Before = token1 == address(0)? address(this).balance.sub(msg.value): IERC20(token1).balanceOf(address(this));
+
+        if (token0Amount > 0 && token0 != address(0)) {
+            IERC20(token0).safeTransferFrom(msg.sender, address(this), token0Amount);
         }
-
-        require(amount > 0, 'LPPool: Cannot stake 0');
-        
-
-        uint256 half = amount.div(2);//取一半都兑换
-        require(half > 0, 'LPPool: half cannot be 0');
-
-        uint256 rAmount = 1;
-        address[] memory path = new address[](2);
-
-        // token-token
+        if (token1Amount > 0 && token1 != address(0)) {
+            IERC20(token1).safeTransferFrom(msg.sender, address(this), token1Amount);
+        }
+        address htRelative = address(0);
         {
-            IERC20(tokenA).approve(address(router), uint(0));
-            IERC20(tokenB).approve(address(router), uint(0));
-            IERC20(tokenA).approve(address(router), ~uint(0));
-            IERC20(tokenB).approve(address(router), ~uint(0));
-        }
-    
-        if (tokenA == WETH || tokenB == WETH) {
-            uint256 amountToken;
-            uint256 amountETH;
-            if (token_ == WETH) {
-                if (tokenA == WETH) {
-                    (path[0], path[1]) = (tokenA, tokenB);
-                } else {
-                    (path[0], path[1]) = (tokenB, tokenA);
-                }
-                uint256[] memory amounts = router.swapExactETHForTokens{value: half}(0, path, address(this), now);
-                amountToken = amounts[1];
-                amountETH   = amounts[0];
-            } else {
-                if (tokenA == WETH) {
-                    (path[0], path[1]) = (tokenB, tokenA);
-                } else {
-                    (path[0], path[1]) = (tokenA, tokenB);
-                }
-                uint256[] memory amounts = router.swapExactTokensForETH(half, 0, path, address(this), now);
-                amountToken = amounts[0];
-                amountETH   = amounts[1];
+            if (token0 == address(0)){
+                token0 = WETH;
+                htRelative = token1;
+                token0Amount = msg.value;
             }
-
-            address token1 = tokenA;
-            if (tokenA == WETH) {
-                token1 = tokenB;
+            if (token1 == address(0)){
+                token1 = WETH;
+                htRelative = token0;
+                token1Amount = msg.value;
             }
-
-            path0 = path[0];//TODO delete
-            path1 = path[1];//TODO delete
-
-            //注入流动性token-ETH
-            (,, uint256 lpAmount) = router.addLiquidityETH{value: amountETH}(token1, amountToken, 0, 0, address(this), now);
-            rAmount = lpAmount;
-        } else {
-            if (token_ == tokenA) {
-                (path[0], path[1]) = (tokenA, tokenB);
-            } else {
-                (path[0], path[1]) = (tokenB, tokenA);
+            // change all ht to WHT if need.
+            uint256 htBalance = address(this).balance;
+            if (htBalance > 0) {
+                IWHT(WETH).deposit{value:htBalance}();
             }
-
-            path0 = path[0];//TODO delete
-            path1 = path[1];//TODO delete
-
-            //购买代币
-            uint256[] memory amounts = router.swapExactTokensForTokens(half, 0, path, address(this), now);
-            
-            dvalue1 = amounts[0];//TODO delete
-            dvalue2 = amounts[1];//TODO delete
-            
-            //注入流动性token-token
-            (,, uint256 lpAmount) = router.addLiquidity(
-                path[0], path[1],
-                amounts[0], amounts[1], 0, 0, address(this), now
-            );
-
-            rAmount = lpAmount;
-            dvalue3 = lpAmount;//TODO delete
         }
 
-        require(rAmount > 0, 'LPPool: Cannot stake 0');
+        IERC20(token0).safeApprove(address(router), 0);
+        IERC20(token0).safeApprove(address(router), uint256(-1));
+        IERC20(token1).safeApprove(address(router), 0);
+        IERC20(token1).safeApprove(address(router), uint256(-1));
 
-        //抵押
-        _totalSupply = _totalSupply.add(rAmount);
-        _balances[msg.sender] = _balances[msg.sender].add(rAmount);
+        //swap and mint LP tokens.
+        calAndSwap(IMdexPair(lpToken), token0, token1, token0Amount, token1Amount);
+
+        uint256 token0After = IERC20(token0).balanceOf(address(this));
+        uint256 token1After = IERC20(token1).balanceOf(address(this));
         
-        emit Staked(msg.sender, rAmount);
+        (,, uint256 lpAmount) = router.addLiquidity(token0, token1, token0After.sub(token0Before), token1After.sub(token1Before), 0, 0, address(this), now);
+        require(lpAmount > 0, 'LPPool: Cannot stake 0');
+
+        uint256 token0After1 = IERC20(token0).balanceOf(address(this));
+        uint256 token1After1 = IERC20(token1).balanceOf(address(this));
+  
+        //剩余的返回给用户
+        if (htRelative == address(0)) {
+            if(token0After1.sub(token0Before)>0) {
+                IERC20(token0).safeTransfer(msg.sender, token0After1.sub(token0Before));
+            }
+            if(token1After1.sub(token1Before)>0) {
+                IERC20(token1).safeTransfer(msg.sender, token1After1.sub(token1Before));
+            }
+        } else {
+            safeUnWrapperAndAllSend(token0, msg.sender,token0After1.sub(token0Before));
+            safeUnWrapperAndAllSend(token1, msg.sender,token1After1.sub(token1Before));
+        }
+        
+        //抵押
+        _totalSupply = _totalSupply.add(lpAmount);
+        _balances[msg.sender] = _balances[msg.sender].add(lpAmount);
+        
+        emit Staked(msg.sender, lpAmount);
     }
 
     function withdraw2(address token_)
@@ -265,6 +221,11 @@ contract ZBTLPTokenPool is Operator {
         {
             lpToken.approve(address(router), uint(0));
             lpToken.approve(address(router), ~uint(0));
+            
+            IERC20(tokenA).safeApprove(address(router), 0);
+            IERC20(tokenA).safeApprove(address(router), uint256(-1));
+            IERC20(tokenB).safeApprove(address(router), 0);
+            IERC20(tokenB).safeApprove(address(router), uint256(-1));
         }
 
         address[] memory path = new address[](2);
@@ -276,13 +237,9 @@ contract ZBTLPTokenPool is Operator {
                 token1 = tokenB;
                 token2 = tokenA;
             }
-
-            dvalue_liquidity = liquidity;
             //移除流动性
             (uint amountToken, uint amountETH) = router.removeLiquidityETH(token1, liquidity, 0, 0, address(this), now);
 
-            dvalue_amountToken = amountToken;
-            dvalue_amountETH   = amountETH;
             //赎回两种币
             if (token_ == address(0)) {
                 IERC20(token1).safeTransfer(msg.sender, amountToken);
@@ -298,8 +255,6 @@ contract ZBTLPTokenPool is Operator {
                     (path[0], path[1]) = (tokenA, tokenB);
                 }
                 uint256[] memory amounts = router.swapExactTokensForETH(amountToken, 0, path, address(this), now);
-                dvalue_total1 = amounts[0];//TODO delete
-                dvalue_total2 = amounts[1];//TODO delete
 
                 total = total.add(amountETH);
                 total = total.add(amounts[1]);
@@ -312,22 +267,15 @@ contract ZBTLPTokenPool is Operator {
                 }
 
                 uint256[] memory amounts = router.swapExactETHForTokens{value: amountETH}(0, path, address(this), now);
-                dvalue_total1 = amounts[0];//TODO delete
-                dvalue_total2 = amounts[1];//TODO delete
 
                 total = total.add(amountToken);
                 total = total.add(amounts[1]);
                 IERC20(token_).safeTransfer(msg.sender, total); 
             }
-
-            dvalue_total4 = total;
         } else {
             //移除流动性
             (uint amountA, uint amountB) = router.removeLiquidity(tokenA, tokenB, liquidity, 0, 0, address(this), now);
             
-            dvalue_total1 = amountA;//TODO delete
-            dvalue_total2 = amountB;//TODO delete
-
             //赎回两种币
             if (token_ == address(0)) {
                 IERC20(tokenA).safeTransfer(msg.sender, amountA);
@@ -350,13 +298,11 @@ contract ZBTLPTokenPool is Operator {
                 total = total.add(amounts[1]);
             }
 
-            dvalue_total4 = total;//TODO delete
-
             IERC20(token_).safeTransfer(msg.sender, total);          
         }
         
 
-        emit Withdrawn(msg.sender, dvalue_total4);
+        emit Withdrawn(msg.sender, liquidity);
     }
 
     // function exit() external {
@@ -373,21 +319,49 @@ contract ZBTLPTokenPool is Operator {
         }
     }
 
+    /// get token balance, if is WHT un wrapper to HT and send to 'to'
+    function safeUnWrapperAndAllSend(address token, address to,uint256 restAmount) internal {
+        if (restAmount > 0) {
+            if (token == WETH) {
+                IWHT(WETH).withdraw(restAmount);
+                safeTransferETH(to, restAmount);
+            } else {
+                IERC20(token).safeTransfer(to, restAmount);
+            }
+        }
+    }
+
+    /// Compute amount and swap between borrowToken and tokenRelative.
+    function calAndSwap(IMdexPair pair, 
+    address token0, 
+    address token1, 
+    uint256 token0Amount,  
+    uint256 token1Amount) internal {
+
+        (uint256 token0Reserve, uint256 token1Reserve,) = pair.getReserves();
+        (uint256 debtReserve, uint256 relativeReserve) = token0 ==
+            lpToken.token0() ? (token0Reserve, token1Reserve) : (token1Reserve, token0Reserve);
+        
+        (uint256 swapAmt, bool isReversed) = TokenSwapUtil.optimalDeposit(token0Amount, token1Amount,
+            debtReserve, relativeReserve);
+        if (swapAmt > 0){
+            address[] memory path = new address[](2);
+            (path[0], path[1]) = isReversed ? (token1, token0) : (token0, token1);
+            router.swapExactTokensForTokens(swapAmt, 0, path, address(this), now);
+        }
+    }
+    
     modifier checkhalve() {
         if (block.timestamp >= starttime && block.timestamp >= periodFinish) {
             period = period.add(1);//进入下一个周期
-            if (period >= 2 && period <= 7 ) {
-                //持续6周
-                duration = duration2; //设置当前周期长度
-            } else {
-                duration = duration3; //设置当前周期长度
-            } 
-        
-            rewardBase = rewardBase.mul(80).div(100);//减产20%
-            rewardRate = rewardBase.div(duration);
+            //持续6周
+            if (period <= 6) {
+                rewardBase = rewardBase.mul(80).div(100);//减产20%
+                rewardRate = rewardBase.div(duration);
 
-            periodFinish = block.timestamp.add(duration);
-            emit RewardAdded(rewardBase);
+                periodFinish = block.timestamp.add(duration);
+                emit RewardAdded(rewardBase);
+            }
         }
         
         _;

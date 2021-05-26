@@ -1,2 +1,3 @@
 # core
-first init core contracts
+
+Smart Contract of Zebra-Protocol finance lab
