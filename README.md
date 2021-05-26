@@ -1,2 +1,2 @@
 # core
-core contracts
+first init core contracts
