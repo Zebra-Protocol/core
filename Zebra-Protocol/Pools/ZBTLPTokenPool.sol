@@ -30,8 +30,6 @@ contract ZBTLPTokenPool is Operator {
 
     uint256 public duration; //周期长度
     uint256 public duration1 = 7 days; //第1阶段周期（1周）
-    uint256 public duration2 = 7 days; //第2阶段周期（1周）持续6周
-    uint256 public duration3 = 90 days; //第2阶段周期（3个月）
     uint256 public period; //周期数
 
     uint256 public rewardBase;
